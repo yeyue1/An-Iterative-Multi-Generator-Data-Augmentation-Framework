@@ -142,6 +142,12 @@ def make_split(
         random_state=seed + 1,
         stratify=y_tmp,
     )
+    train_min = x_train.min(axis=0, keepdims=True)
+    train_range = x_train.max(axis=0, keepdims=True) - train_min
+    train_range = np.where(train_range > 1e-12, train_range, 1.0)
+    x_train = np.clip((x_train - train_min) / train_range, 0.0, 1.0)
+    x_val = np.clip((x_val - train_min) / train_range, 0.0, 1.0)
+    x_test = np.clip((x_test - train_min) / train_range, 0.0, 1.0)
     index_to_label = {idx: label for label, idx in label_to_index.items()}
     return DatasetSplit(
         x_train=x_train.astype(np.float32),

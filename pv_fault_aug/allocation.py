@@ -21,7 +21,7 @@ def compute_difficulty_weights(feedback: FeedbackSignals, config: FrameworkConfi
         return np.ones_like(feedback.scarcity, dtype=np.float64)
 
     if not config.use_feedback_allocation:
-        return np.maximum(feedback.scarcity, 1e-8)
+        return np.ones_like(feedback.scarcity, dtype=np.float64)
 
     weights = (
         config.alpha_error * feedback.error_rate

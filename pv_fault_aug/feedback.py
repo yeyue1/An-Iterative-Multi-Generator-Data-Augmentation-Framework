@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
-from .models.classifier import predict_proba
+if TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -19,14 +20,16 @@ class FeedbackSignals:
 
 
 def compute_feedback(
-    classifier: torch.nn.Module,
+    classifier: "torch.nn.Module",
     x_val: np.ndarray,
     y_val: np.ndarray,
     x_aug: np.ndarray,
     y_aug: np.ndarray,
     n_classes: int,
-    device: torch.device,
+    device: "torch.device",
 ) -> FeedbackSignals:
+    from .models.classifier import predict_proba
+
     y_prob = predict_proba(classifier, x_val, device)
     y_pred = y_prob.argmax(axis=1)
 

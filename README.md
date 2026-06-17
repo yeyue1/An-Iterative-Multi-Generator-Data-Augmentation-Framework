@@ -26,7 +26,7 @@ np.savez("pv_fault_data.npz", x=x_array, y=labels)
 
 ## Main command
 
-From `论文代码`:
+From the repository root:
 
 ```powershell
 python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --output-dir outputs\scarce
@@ -79,6 +79,18 @@ python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce
 - `pv_fault_aug/mopso.py`: compact MOPSO implementation for generator global weights.
 - `pv_fault_aug/screening.py`: MMD/Wasserstein distributional gate and F1-gain performance gate.
 - `pv_fault_aug/pipeline.py`: closed-loop iterative augmentation process and result export.
+
+## Paper correspondence
+
+The implementation follows Algorithm 1 in the manuscript:
+
+- The real training split initializes `D_aug`, while validation and test data are never augmented.
+- I-V features are min-max normalized with training-set statistics after the stratified split.
+- Per-class error, entropy confidence, and scarcity form the feedback vector used for difficulty weights.
+- MOPSO selects global generator weights from probing quotas using distributional quality, validation F1, and entropy objectives.
+- Class quotas and generator-class quotas are updated before candidate generation.
+- Candidate samples pass class-wise MMD/Wasserstein screening and the class-bound marginal F1 gate before entering `D_aug`.
+- Convergence uses round-level F1 saturation together with feature-center drift, matching the joint stopping rule in the paper.
 
 `--variant baseline` trains the classifier directly on the selected scenario
 without synthetic augmentation. The other variants keep the same data split and

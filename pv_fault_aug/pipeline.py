@@ -7,7 +7,7 @@ import json
 import numpy as np
 import torch
 
-from .allocation import build_allocation_plan
+from .allocation import build_allocation_plan, compute_class_quotas, compute_difficulty_weights
 from .config import ExperimentConfig
 from .data import DatasetSplit
 from .feedback import compute_feedback
@@ -15,7 +15,7 @@ from .metrics import classification_metrics, feature_center, per_class_f1
 from .models.classifier import predict_proba, train_classifier
 from .models.generators import build_generators
 from .mopso import optimize_generator_weights
-from .screening import dual_gate_screen, merge_candidates
+from .screening import dual_gate_screen, merge_candidates, rbf_mmd
 
 
 @dataclass
@@ -59,6 +59,56 @@ class ClosedLoopAugmentor:
         config.validate()
         self.config = config
         self.device = resolve_device(config.device)
+
+    def _probing_scores(
+        self,
+        generators,
+        probing_quotas: dict[int, int],
+        x_aug: np.ndarray,
+        y_aug: np.ndarray,
+        x_val: np.ndarray,
+        y_val: np.ndarray,
+        input_dim: int,
+        n_classes: int,
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        mmd_scores: dict[str, float] = {}
+        f1_scores: dict[str, float] = {}
+
+        for generator in generators:
+            probing = generator.sample_many(probing_quotas)
+            if len(probing.labels) == 0:
+                mmd_scores[generator.name] = float("inf")
+                f1_scores[generator.name] = 0.0
+                continue
+
+            class_mmd: list[float] = []
+            for class_id in range(n_classes):
+                real_mask = y_aug == class_id
+                probe_mask = probing.labels == class_id
+                if np.any(real_mask) and np.any(probe_mask):
+                    class_mmd.append(rbf_mmd(x_aug[real_mask], probing.samples[probe_mask]))
+            mmd_scores[generator.name] = float(np.mean(class_mmd)) if class_mmd else float("inf")
+
+            x_probe = np.vstack([x_aug, probing.samples])
+            y_probe = np.concatenate([y_aug, probing.labels])
+            probe_classifier = train_classifier(
+                x_probe,
+                y_probe,
+                x_val,
+                y_val,
+                input_dim,
+                n_classes,
+                self.config.classifier,
+                self.device,
+                epochs=self.config.classifier.feedback_epochs,
+            )
+            probe_prob = predict_proba(probe_classifier, x_val, self.device)
+            probe_pred = probe_prob.argmax(axis=1)
+            f1_scores[generator.name] = classification_metrics(
+                y_val, probe_pred, probe_prob, n_classes
+            )["f1_macro"]
+
+        return mmd_scores, f1_scores
 
     def run(self, split: DatasetSplit, seed: int) -> ClosedLoopResult:
         torch.manual_seed(seed)
@@ -119,16 +169,24 @@ class ClosedLoopAugmentor:
                 self.device,
             )
 
-            avg_contribution = {
-                name: float(np.mean(scores)) for name, scores in contribution_scores.items()
-            }
-            mmd_proxy = {name: 1.0 / max(avg_contribution.get(name, 1.0), 1e-6) for name in generator_names}
-            diversity_proxy = {name: float(np.std(scores) + 0.1) for name, scores in contribution_scores.items()}
+            difficulty_weights = compute_difficulty_weights(feedback, self.config.framework)
+            probing_quotas = compute_class_quotas(
+                difficulty_weights, feedback.class_counts, self.config.framework
+            )
+            mmd_scores, f1_scores = self._probing_scores(
+                generators,
+                probing_quotas,
+                x_aug,
+                y_aug,
+                split.x_val,
+                split.y_val,
+                input_dim,
+                n_classes,
+            )
             mopso = optimize_generator_weights(
                 generator_names,
-                mmd_proxy,
-                avg_contribution,
-                diversity_proxy,
+                mmd_scores,
+                f1_scores,
                 self.config.mopso,
                 seed=seed + iteration,
             )
@@ -165,6 +223,28 @@ class ClosedLoopAugmentor:
                 x_aug = np.vstack([x_aug, screened.accepted_x])
                 y_aug = np.concatenate([y_aug, screened.accepted_y])
 
+            if len(screened.accepted_y) > 0:
+                round_classifier = train_classifier(
+                    x_aug,
+                    y_aug,
+                    split.x_val,
+                    split.y_val,
+                    input_dim,
+                    n_classes,
+                    self.config.classifier,
+                    self.device,
+                    epochs=self.config.classifier.feedback_epochs,
+                )
+                round_prob = predict_proba(round_classifier, split.x_val, self.device)
+                round_pred = round_prob.argmax(axis=1)
+                round_metrics = classification_metrics(
+                    split.y_val, round_pred, round_prob, n_classes
+                )
+                round_f1_gain = (round_metrics["f1_macro"] - val_metrics["f1_macro"]) / 100.0
+            else:
+                round_metrics = val_metrics
+                round_f1_gain = 0.0
+
             current_center = feature_center(x_aug)
             drift = float(np.linalg.norm(current_center - previous_center))
             previous_center = current_center
@@ -185,7 +265,7 @@ class ClosedLoopAugmentor:
                     generated_counts[name] + 2.0
                 )
 
-            if screened.f1_gain < self.config.framework.min_f1_gain:
+            if round_f1_gain < self.config.framework.min_f1_gain:
                 saturation_count += 1
             else:
                 saturation_count = 0
@@ -193,8 +273,8 @@ class ClosedLoopAugmentor:
             history.append(
                 IterationRecord(
                     iteration=iteration,
-                    f1_macro=val_metrics["f1_macro"],
-                    f1_gain=screened.f1_gain * 100.0,
+                    f1_macro=round_metrics["f1_macro"],
+                    f1_gain=round_f1_gain * 100.0,
                     accepted_samples=int(len(screened.accepted_y)),
                     feature_center_drift=drift,
                     class_quotas=allocation.class_quotas,

@@ -107,8 +107,7 @@ class MOPSO:
 def optimize_generator_weights(
     generator_names: list[str],
     mmd_scores: dict[str, float],
-    contribution_scores: dict[str, float],
-    diversity_scores: dict[str, float],
+    validation_f1_scores: dict[str, float],
     config: MopsoConfig,
     seed: int,
 ) -> MopsoResult:
@@ -116,8 +115,10 @@ def optimize_generator_weights(
 
     def objective(weights: np.ndarray) -> np.ndarray:
         mmd = sum(weights[i] * mmd_scores.get(names[i], 1.0) for i in range(len(names)))
-        contribution = sum(weights[i] * contribution_scores.get(names[i], 0.5) for i in range(len(names)))
-        diversity = sum(weights[i] * diversity_scores.get(names[i], 0.5) for i in range(len(names)))
-        return np.asarray([mmd, -contribution, -diversity], dtype=np.float64)
+        validation_f1 = sum(
+            weights[i] * validation_f1_scores.get(names[i], 0.0) for i in range(len(names))
+        )
+        entropy_objective = float(np.sum(weights * np.log(weights + 1e-12)))
+        return np.asarray([mmd, -validation_f1, entropy_objective], dtype=np.float64)
 
     return MOPSO(config, seed=seed).optimize(len(names), objective)

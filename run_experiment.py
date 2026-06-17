@@ -84,12 +84,12 @@ def main() -> None:
 
     import numpy as np
 
-    from pv_fault_aug.data import load_scenario_split
-    from pv_fault_aug.pipeline import ClosedLoopAugmentor
-
     if args.make_demo_data:
         make_demo_data(args.data_path, args.feature_dim)
         return
+
+    from pv_fault_aug.data import load_scenario_split
+    from pv_fault_aug.pipeline import ClosedLoopAugmentor
 
     config = ExperimentConfig()
     config.data.data_path = args.data_path
