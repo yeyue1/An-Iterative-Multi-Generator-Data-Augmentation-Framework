@@ -69,6 +69,76 @@ Run generator-pool experiments by selecting a subset:
 python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --generators wgan_gp,ctgan,cvae
 ```
 
+## Additional experiments reported in the manuscript
+
+### Baseline comparison and cost table
+
+`run_baselines.py` evaluates the proposed framework next to the baselines used
+in the comparison table: no augmentation, SMOTE, one-shot WGAN-GP/CVAE/DDPM,
+the static equal-weight ensemble, GAN+SMOTE, uncertainty-guided adaptive
+augmentation, and curriculum-style adaptive augmentation.  It writes per-run
+metrics, a comparison table, wall-clock cost, and run-matched paired
+differences against the proposed framework.
+
+```powershell
+python run_baselines.py --data-path path\to\pv_fault_data.csv --scenario all --runs 5
+```
+
+Outputs: `runs.csv`, `comparison_table.csv`, `summary.json`,
+`paired_vs_proposed.csv`, and `predictions/` (per-run test predictions).
+
+### Generator-pool comparison under a fixed budget
+
+`run_generator_pool.py` compares individual generators and cumulative
+combinations.  `--mode fixed` allocates an identical accepted-sample budget to
+every pool (the controlled comparison); `--mode natural` runs the full
+closed-loop policy with each pool, so larger pools accept more samples.
+
+```powershell
+python run_generator_pool.py --data-path path\to\pv_fault_data.csv --scenario scarce --mode fixed --budget 500
+python run_generator_pool.py --data-path path\to\pv_fault_data.csv --scenario scarce --mode natural
+```
+
+### Error analysis, robustness, and physical checks
+
+`run_analysis.py` produces the confusion matrices, class-pair table, operating
+regime analysis, measurement/domain perturbations, group-held-out shifts, and
+real-versus-generated physical parameters.
+
+```powershell
+python run_analysis.py --data-path path\to\pv_fault_data.csv --scenario scarce --runs 5
+```
+
+Optional metadata columns enable the regime and group-held-out experiments.  A
+CSV may include `irradiance`, `temperature`, `module_id`, and `condition_id`;
+an NPZ may store them as arrays with the same names.  Pass
+`--metadata-columns irradiance,temperature,module_id,condition_id` (the default)
+so they are excluded from the features and carried through the split.  Use
+`--voltage-max` and `--current-max` to express physical parameters in volts,
+amperes, and watts; otherwise the parameters are reported in normalised units.
+
+Outputs: `analysis_summary.json` and `figures/` (`confusion_matrices.png`,
+`real_vs_generated.png`).
+
+### Alternative classifiers
+
+All scripts accept `--classifier {cnn1d,resnet1d,bilstm}` for the
+classifier-generality experiment.
+
+```powershell
+python run_baselines.py --data-path path\to\pv_fault_data.csv --scenario scarce --classifier resnet1d --runs 5
+python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --classifier bilstm
+```
+
+### Run-level figures
+
+`make_figures.py` builds the convergence and allocation figures from the
+`{scenario}_run_*` directories written by `run_experiment.py`.
+
+```powershell
+python make_figures.py --runs-root outputs --output-dir outputs\figures
+```
+
 ## Implemented modules
 
 - `pv_fault_aug/data.py`: CSV/NPZ loading, balanced/imbalanced/scarce scenario construction, stratified train/validation/test split.
@@ -79,6 +149,10 @@ python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce
 - `pv_fault_aug/mopso.py`: compact MOPSO implementation for generator global weights.
 - `pv_fault_aug/screening.py`: MMD/Wasserstein distributional gate and F1-gain performance gate.
 - `pv_fault_aug/pipeline.py`: closed-loop iterative augmentation process and result export.
+- `pv_fault_aug/baselines.py`: SMOTE, one-shot generation, static ensemble, GAN+SMOTE, uncertainty-guided and curriculum-style baselines under the same splits.
+- `pv_fault_aug/analysis.py`: confusion/class-pair analysis, operating regimes, measurement and domain perturbations, group-held-out splits, and physical I-V parameters.
+- `pv_fault_aug/stats.py`: run-matched paired differences and bootstrap confidence intervals (descriptive, no p-values).
+- `pv_fault_aug/figures.py`: run-level convergence/allocation, confusion-matrix, and real-versus-generated figures.
 
 ## Paper correspondence
 

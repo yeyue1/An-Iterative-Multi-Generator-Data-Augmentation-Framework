@@ -36,6 +36,11 @@ class ClosedLoopResult:
     final_metrics: dict[str, float]
     per_class_f1: dict[str, float]
     history: list[IterationRecord]
+    test_prob: np.ndarray | None = None
+    test_pred: np.ndarray | None = None
+    accepted_x: np.ndarray | None = None
+    accepted_y: np.ndarray | None = None
+    model: object | None = None
 
 
 def resolve_device(name: str) -> torch.device:
@@ -101,6 +106,7 @@ class ClosedLoopAugmentor:
                 self.config.classifier,
                 self.device,
                 epochs=self.config.classifier.feedback_epochs,
+                architecture=self.config.classifier.architecture,
             )
             probe_prob = predict_proba(probe_classifier, x_val, self.device)
             probe_pred = probe_prob.argmax(axis=1)
@@ -134,6 +140,8 @@ class ClosedLoopAugmentor:
             else np.empty(0, dtype=np.float64)
         )
         history: list[IterationRecord] = []
+        accepted_x_parts: list[np.ndarray] = []
+        accepted_y_parts: list[np.ndarray] = []
         previous_center = feature_center(x_aug)
         saturation_count = 0
 
@@ -155,6 +163,7 @@ class ClosedLoopAugmentor:
                 n_classes,
                 self.config.classifier,
                 self.device,
+                architecture=self.config.classifier.architecture,
             )
             val_prob = predict_proba(classifier, split.x_val, self.device)
             val_pred = val_prob.argmax(axis=1)
@@ -222,6 +231,8 @@ class ClosedLoopAugmentor:
             if len(screened.accepted_y) > 0:
                 x_aug = np.vstack([x_aug, screened.accepted_x])
                 y_aug = np.concatenate([y_aug, screened.accepted_y])
+                accepted_x_parts.append(screened.accepted_x)
+                accepted_y_parts.append(screened.accepted_y)
 
             if len(screened.accepted_y) > 0:
                 round_classifier = train_classifier(
@@ -234,6 +245,7 @@ class ClosedLoopAugmentor:
                     self.config.classifier,
                     self.device,
                     epochs=self.config.classifier.feedback_epochs,
+                    architecture=self.config.classifier.architecture,
                 )
                 round_prob = predict_proba(round_classifier, split.x_val, self.device)
                 round_pred = round_prob.argmax(axis=1)
@@ -301,6 +313,7 @@ class ClosedLoopAugmentor:
             n_classes,
             self.config.classifier,
             self.device,
+            architecture=self.config.classifier.architecture,
         )
         test_prob = predict_proba(final_classifier, split.x_test, self.device)
         test_pred = test_prob.argmax(axis=1)
@@ -310,12 +323,38 @@ class ClosedLoopAugmentor:
             split.index_to_label[idx]: float(class_f1[idx]) for idx in range(n_classes)
         }
 
-        return ClosedLoopResult(final_metrics=final_metrics, per_class_f1=per_class, history=history)
+        accepted_x = np.vstack(accepted_x_parts) if accepted_x_parts else np.empty((0, input_dim), dtype=np.float32)
+        accepted_y = np.concatenate(accepted_y_parts) if accepted_y_parts else np.empty(0, dtype=np.int64)
+        return ClosedLoopResult(
+            final_metrics=final_metrics,
+            per_class_f1=per_class,
+            history=history,
+            test_prob=test_prob,
+            test_pred=test_pred,
+            accepted_x=accepted_x,
+            accepted_y=accepted_y,
+            model=final_classifier,
+        )
 
     def save_result(self, result: ClosedLoopResult, output_dir: Path) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "final_metrics": result.final_metrics,
+            "per_class_f1": result.per_class_f1,
+            "history": [asdict(row) for row in result.history],
+        }
         with (output_dir / "closed_loop_result.json").open("w", encoding="utf-8") as fh:
-            json.dump(result, fh, default=_json_ready, indent=2)
+            json.dump(payload, fh, default=_json_ready, indent=2)
+        arrays = {}
+        if result.test_prob is not None:
+            arrays["test_prob"] = result.test_prob
+        if result.test_pred is not None:
+            arrays["test_pred"] = result.test_pred
+        if result.accepted_x is not None:
+            arrays["accepted_x"] = result.accepted_x
+            arrays["accepted_y"] = result.accepted_y
+        if arrays:
+            np.savez_compressed(output_dir / "run_arrays.npz", **arrays)
 
         history_path = output_dir / "iteration_history.csv"
         with history_path.open("w", encoding="utf-8") as fh:

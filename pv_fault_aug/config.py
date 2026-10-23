@@ -6,6 +6,7 @@ from pathlib import Path
 
 FAULT_CLASSES = ["NS", "SC", "OC", "PS", "DOA", "DOA+SC", "DOA+OC"]
 SUPPORTED_GENERATORS = ("wgan_gp", "ctgan", "cvae", "vaegan", "ddpm", "cddpm")
+SUPPORTED_CLASSIFIERS = ("cnn1d", "resnet1d", "bilstm")
 SUPPORTED_VARIANTS = (
     "full",
     "baseline",
@@ -29,10 +30,16 @@ class DataConfig:
     random_seed: int = 42
     n_runs: int = 5
     class_names: list[str] = field(default_factory=lambda: FAULT_CLASSES.copy())
+    metadata_columns: tuple[str, ...] = ()
+    irradiance_column: str = "irradiance"
+    temperature_column: str = "temperature"
+    module_column: str = "module_id"
+    condition_column: str = "condition_id"
 
 
 @dataclass
 class ClassifierConfig:
+    architecture: str = "cnn1d"
     epochs: int = 200
     feedback_epochs: int = 30
     batch_size: int = 64
@@ -132,6 +139,10 @@ class ExperimentConfig:
             raise ValueError("scenario must be one of: balanced, imbalanced, scarce")
         if self.variant not in SUPPORTED_VARIANTS:
             raise ValueError(f"variant must be one of: {', '.join(SUPPORTED_VARIANTS)}")
+        if self.classifier.architecture not in SUPPORTED_CLASSIFIERS:
+            raise ValueError(
+                f"classifier.architecture must be one of: {', '.join(SUPPORTED_CLASSIFIERS)}"
+            )
         unknown_generators = sorted(set(self.generators.names) - set(SUPPORTED_GENERATORS))
         if unknown_generators:
             raise ValueError(f"Unknown generators: {unknown_generators}")

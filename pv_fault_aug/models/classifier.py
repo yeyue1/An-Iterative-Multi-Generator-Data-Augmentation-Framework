@@ -45,6 +45,100 @@ class CNN1DClassifier(nn.Module):
         return self.classifier(self.features(x))
 
 
+class ResBlock1D(nn.Module):
+    def __init__(self, channels: int, kernel_size: int = 5) -> None:
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm1d(channels)
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size, padding=padding)
+        self.bn2 = nn.BatchNorm1d(channels)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return self.act(out + residual)
+
+
+class ResNet1DClassifier(nn.Module):
+    """Residual 1D network used for the classifier-generality experiment."""
+
+    def __init__(self, input_dim: int, n_classes: int, dropout: float = 0.5) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(1, 64, kernel_size=7, padding=3),
+            nn.BatchNorm1d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(2),
+        )
+        self.blocks = nn.Sequential(ResBlock1D(64), ResBlock1D(64), ResBlock1D(64))
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Dropout(dropout),
+            nn.Linear(64, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
+        return self.head(self.blocks(self.stem(x)))
+
+
+class BiLSTMClassifier(nn.Module):
+    """Bidirectional LSTM used for the classifier-generality experiment."""
+
+    def __init__(self, input_dim: int, n_classes: int, dropout: float = 0.5, hidden: int = 64) -> None:
+        super().__init__()
+        self.input_proj = nn.Linear(1, 32)
+        self.lstm = nn.LSTM(
+            input_size=32,
+            hidden_size=hidden,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True,
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden * 2, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(128, n_classes),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 2:
+            x = x.unsqueeze(-1)
+        features = torch.relu(self.input_proj(x))
+        outputs, _ = self.lstm(features)
+        pooled = outputs.mean(dim=1)
+        return self.classifier(pooled)
+
+
+SUPPORTED_CLASSIFIERS = ("cnn1d", "resnet1d", "bilstm")
+
+
+def build_classifier(
+    architecture: str,
+    input_dim: int,
+    n_classes: int,
+    dropout: float = 0.5,
+) -> nn.Module:
+    architecture = architecture.lower()
+    if architecture == "cnn1d":
+        return CNN1DClassifier(input_dim, n_classes, dropout=dropout)
+    if architecture == "resnet1d":
+        return ResNet1DClassifier(input_dim, n_classes, dropout=dropout)
+    if architecture == "bilstm":
+        return BiLSTMClassifier(input_dim, n_classes, dropout=dropout)
+    raise ValueError(
+        f"Unknown classifier architecture: {architecture}. "
+        f"Choose one of: {', '.join(SUPPORTED_CLASSIFIERS)}"
+    )
+
+
 def _make_loader(x: np.ndarray, y: np.ndarray, batch_size: int, shuffle: bool) -> DataLoader:
     dataset = TensorDataset(torch.as_tensor(x, dtype=torch.float32), torch.as_tensor(y, dtype=torch.long))
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=False)
@@ -71,8 +165,9 @@ def train_classifier(
     config: ClassifierConfig,
     device: torch.device,
     epochs: int | None = None,
-) -> CNN1DClassifier:
-    model = CNN1DClassifier(input_dim, n_classes, dropout=config.dropout).to(device)
+    architecture: str = "cnn1d",
+) -> nn.Module:
+    model = build_classifier(architecture, input_dim, n_classes, dropout=config.dropout).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,

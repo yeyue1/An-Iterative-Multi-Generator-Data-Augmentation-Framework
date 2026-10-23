@@ -5,7 +5,12 @@ from dataclasses import asdict
 from pathlib import Path
 import json
 
-from pv_fault_aug.config import ExperimentConfig, SUPPORTED_GENERATORS, SUPPORTED_VARIANTS
+from pv_fault_aug.config import (
+    ExperimentConfig,
+    SUPPORTED_CLASSIFIERS,
+    SUPPORTED_GENERATORS,
+    SUPPORTED_VARIANTS,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,6 +34,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:0.")
+    parser.add_argument(
+        "--classifier",
+        default="cnn1d",
+        choices=SUPPORTED_CLASSIFIERS,
+        help="Downstream classifier architecture.",
+    )
+    parser.add_argument(
+        "--metadata-columns",
+        default="",
+        help="Comma-separated metadata columns to carry through the split "
+        "(e.g. irradiance,temperature,module_id,condition_id).",
+    )
     parser.add_argument("--runs", type=int, default=5, help="Number of stratified random runs.")
     parser.add_argument(
         "--variant",
@@ -101,6 +118,10 @@ def main() -> None:
     config.output_dir = args.output_dir
     config.device = args.device
     config.data.n_runs = args.runs
+    config.data.metadata_columns = tuple(
+        name.strip() for name in args.metadata_columns.split(",") if name.strip()
+    )
+    config.classifier.architecture = args.classifier
     config.variant = args.variant
     config.generators.names = tuple(
         name.strip() for name in args.generators.split(",") if name.strip()

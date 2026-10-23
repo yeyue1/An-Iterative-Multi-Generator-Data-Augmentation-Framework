@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -18,9 +18,20 @@ class DatasetSplit:
     y_test: np.ndarray
     label_to_index: dict[str, int]
     index_to_label: dict[int, str]
+    train_metadata: dict[str, np.ndarray] = field(default_factory=dict)
+    val_metadata: dict[str, np.ndarray] = field(default_factory=dict)
+    test_metadata: dict[str, np.ndarray] = field(default_factory=dict)
 
 
-def load_fault_dataset(config: DataConfig) -> tuple[np.ndarray, np.ndarray, dict[str, int]]:
+def _subset_metadata(
+    metadata: dict[str, np.ndarray], indices: np.ndarray
+) -> dict[str, np.ndarray]:
+    return {name: np.asarray(values)[indices] for name, values in metadata.items()}
+
+
+def load_fault_dataset(
+    config: DataConfig,
+) -> tuple[np.ndarray, np.ndarray, dict[str, int], dict[str, np.ndarray]]:
     """Load a PV fault dataset from CSV or NPZ.
 
     CSV format:
@@ -39,10 +50,15 @@ def load_fault_dataset(config: DataConfig) -> tuple[np.ndarray, np.ndarray, dict
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
 
+    metadata: dict[str, np.ndarray] = {}
+
     if path.suffix.lower() == ".npz":
         data = np.load(path, allow_pickle=True)
         x = np.asarray(data["x"], dtype=np.float32)
         y_raw = np.asarray(data["y"])
+        for name in config.metadata_columns:
+            if name in data.files:
+                metadata[name] = np.asarray(data[name])
     elif path.suffix.lower() == ".csv":
         try:
             import pandas as pd
@@ -56,10 +72,14 @@ def load_fault_dataset(config: DataConfig) -> tuple[np.ndarray, np.ndarray, dict
         if config.label_column not in frame.columns:
             raise ValueError(f"Missing label column: {config.label_column}")
         y_raw = frame[config.label_column].to_numpy()
+        metadata_cols = [c for c in config.metadata_columns if c in frame.columns]
+        for name in metadata_cols:
+            metadata[name] = frame[name].to_numpy()
         if config.feature_prefix:
             feature_cols = [c for c in frame.columns if c.startswith(config.feature_prefix)]
         else:
-            feature_cols = [c for c in frame.columns if c != config.label_column]
+            excluded = {config.label_column, *metadata_cols}
+            feature_cols = [c for c in frame.columns if c not in excluded]
         x = frame[feature_cols].to_numpy(dtype=np.float32)
     else:
         raise ValueError("Supported dataset formats are .csv and .npz")
@@ -80,7 +100,7 @@ def load_fault_dataset(config: DataConfig) -> tuple[np.ndarray, np.ndarray, dict
             raise ValueError(f"Unknown labels in dataset: {missing}")
         y = np.asarray([label_to_index[str(label)] for label in y_raw], dtype=np.int64)
 
-    return x, y, label_to_index
+    return x, y, label_to_index, metadata
 
 
 def construct_scenario(
@@ -89,18 +109,22 @@ def construct_scenario(
     scenario: str,
     config: DataConfig,
     seed: int,
-) -> tuple[np.ndarray, np.ndarray]:
+    metadata: dict[str, np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    metadata = metadata or {}
     rng = np.random.default_rng(seed)
     selected: list[int] = []
     labels = np.unique(y)
 
     if scenario == "imbalanced":
-        return x.copy(), y.copy()
+        indices = np.arange(len(y))
+        return x.copy(), y.copy(), _subset_metadata(metadata, indices)
 
+    min_count = min(int(np.sum(y == label)) for label in labels)
     for label in labels:
         class_indices = np.where(y == label)[0]
         if scenario == "balanced":
-            n_select = min(np.sum(y == current_label) for current_label in labels)
+            n_select = min_count
         elif scenario == "scarce":
             n_select = max(1, int(round(len(class_indices) * config.scarce_ratio)))
         else:
@@ -109,7 +133,11 @@ def construct_scenario(
 
     selected_array = np.asarray(selected, dtype=np.int64)
     rng.shuffle(selected_array)
-    return x[selected_array].copy(), y[selected_array].copy()
+    return (
+        x[selected_array].copy(),
+        y[selected_array].copy(),
+        _subset_metadata(metadata, selected_array),
+    )
 
 
 def make_split(
@@ -118,7 +146,9 @@ def make_split(
     label_to_index: dict[str, int],
     config: DataConfig,
     seed: int,
+    metadata: dict[str, np.ndarray] | None = None,
 ) -> DatasetSplit:
+    metadata = metadata or {}
     try:
         from sklearn.model_selection import train_test_split
     except ModuleNotFoundError as exc:
@@ -127,21 +157,24 @@ def make_split(
             "`pip install -r requirements.txt`."
         ) from exc
 
-    x_train, x_tmp, y_train, y_tmp = train_test_split(
-        x,
-        y,
+    indices = np.arange(len(y))
+    idx_train, idx_tmp = train_test_split(
+        indices,
         train_size=config.train_ratio,
         random_state=seed,
         stratify=y,
     )
     relative_val = config.val_ratio / (config.val_ratio + config.test_ratio)
-    x_val, x_test, y_val, y_test = train_test_split(
-        x_tmp,
-        y_tmp,
+    idx_val, idx_test = train_test_split(
+        idx_tmp,
         train_size=relative_val,
         random_state=seed + 1,
-        stratify=y_tmp,
+        stratify=y[idx_tmp],
     )
+    x_train, y_train = x[idx_train], y[idx_train]
+    x_val, y_val = x[idx_val], y[idx_val]
+    x_test, y_test = x[idx_test], y[idx_test]
+
     train_min = x_train.min(axis=0, keepdims=True)
     train_range = x_train.max(axis=0, keepdims=True) - train_min
     train_range = np.where(train_range > 1e-12, train_range, 1.0)
@@ -158,6 +191,9 @@ def make_split(
         y_test=y_test.astype(np.int64),
         label_to_index=label_to_index,
         index_to_label=index_to_label,
+        train_metadata=_subset_metadata(metadata, idx_train),
+        val_metadata=_subset_metadata(metadata, idx_val),
+        test_metadata=_subset_metadata(metadata, idx_test),
     )
 
 
@@ -166,6 +202,10 @@ def load_scenario_split(
     scenario: str,
     seed: int,
 ) -> DatasetSplit:
-    x, y, label_to_index = load_fault_dataset(data_config)
-    x_scenario, y_scenario = construct_scenario(x, y, scenario, data_config, seed)
-    return make_split(x_scenario, y_scenario, label_to_index, data_config, seed)
+    x, y, label_to_index, metadata = load_fault_dataset(data_config)
+    x_scenario, y_scenario, metadata_scenario = construct_scenario(
+        x, y, scenario, data_config, seed, metadata
+    )
+    return make_split(
+        x_scenario, y_scenario, label_to_index, data_config, seed, metadata_scenario
+    )
