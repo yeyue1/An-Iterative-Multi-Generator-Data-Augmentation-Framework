@@ -41,10 +41,16 @@ def _nondominated(points: np.ndarray) -> np.ndarray:
 
 
 def _scalar_score(objectives: np.ndarray) -> np.ndarray:
-    mins = objectives.min(axis=0)
-    maxs = objectives.max(axis=0)
-    scaled = (objectives - mins) / np.maximum(maxs - mins, 1e-12)
-    return scaled.mean(axis=1)
+    """Equal-weight normalized Tchebycheff scalarization over the archive.
+
+    Each objective is divided by its ideal-nadir range of the current archive
+    and the largest normalized deviation is minimised, following Eq. (mopso_select)
+    of the manuscript.
+    """
+    ideal = objectives.min(axis=0)
+    nadir = objectives.max(axis=0)
+    scaled = np.abs(objectives - ideal) / np.maximum(nadir - ideal, 1e-12)
+    return scaled.max(axis=1)
 
 
 class MOPSO:
