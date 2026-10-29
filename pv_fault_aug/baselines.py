@@ -40,6 +40,18 @@ def _n_classes(split: DatasetSplit) -> int:
     return len(split.label_to_index)
 
 
+def _seed_everything(seed: int) -> None:
+    """Match the seed handling of the closed-loop runs.
+
+    All methods share the same split and are run with the same five seeds;
+    every stochastic component of a baseline is reset from that seed so that
+    differences in Table 5 reflect the augmentation strategy rather than
+    initialization noise.
+    """
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+
+
 def _train_eval(
     x_train: np.ndarray,
     y_train: np.ndarray,
@@ -184,6 +196,7 @@ def _sample_from_generators(
 def run_no_augmentation(
     config: ExperimentConfig, split: DatasetSplit, seed: int, device: torch.device
 ) -> ExperimentOutcome:
+    _seed_everything(seed)
     start = time.perf_counter()
     metrics, per_class, y_true, y_pred, y_prob = _train_eval(
         split.x_train, split.y_train, split, config, device
@@ -207,6 +220,7 @@ def run_smote(
     device: torch.device,
     budget: int | None = None,
 ) -> ExperimentOutcome:
+    _seed_everything(seed)
     start = time.perf_counter()
     n_classes = _n_classes(split)
     budget = budget or max(200, len(split.x_train))
@@ -240,6 +254,7 @@ def run_oneshot(
     method_name: str | None = None,
 ) -> ExperimentOutcome:
     """One-shot generation with a fixed budget and no classifier feedback."""
+    _seed_everything(seed)
     start = time.perf_counter()
     n_classes = _n_classes(split)
     budget = budget or max(200, len(split.x_train))
@@ -276,6 +291,7 @@ def run_static_ensemble(
     budget: int | None = None,
 ) -> ExperimentOutcome:
     """Equal-weight multi-generator ensemble without feedback or gating."""
+    _seed_everything(seed)
     start = time.perf_counter()
     n_classes = _n_classes(split)
     budget = budget or max(200, len(split.x_train))
@@ -310,6 +326,7 @@ def run_gan_smote(
     generator_name: str = "wgan_gp",
 ) -> ExperimentOutcome:
     """GAN generation for rare classes followed by SMOTE balancing."""
+    _seed_everything(seed)
     start = time.perf_counter()
     n_classes = _n_classes(split)
     budget = budget or max(200, len(split.x_train))
@@ -381,6 +398,7 @@ def _iterative_quota_baseline(
     x_aug = split.x_train.copy()
     y_aug = split.y_train.copy()
     total_accepted = 0
+    used_iterations = 0
     framework = config.framework
     for iteration in range(iterations):
         model = train_classifier(
@@ -413,7 +431,8 @@ def _iterative_quota_baseline(
         x_aug = np.vstack([x_aug, x_new])
         y_aug = np.concatenate([y_aug, y_new])
         total_accepted += accepted
-    return x_aug, y_aug, total_accepted, iterations
+        used_iterations = iteration + 1
+    return x_aug, y_aug, total_accepted, used_iterations
 
 
 def run_uncertainty_guided(
@@ -424,6 +443,7 @@ def run_uncertainty_guided(
     iterations: int | None = None,
     budget_per_round: int | None = None,
 ) -> ExperimentOutcome:
+    _seed_everything(seed)
     start = time.perf_counter()
     iterations = iterations or min(config.framework.max_iterations, 10)
     budget_per_round = budget_per_round or max(64, config.framework.base_quota * len(split.label_to_index))
@@ -453,6 +473,7 @@ def run_curriculum(
     iterations: int | None = None,
     budget_per_round: int | None = None,
 ) -> ExperimentOutcome:
+    _seed_everything(seed)
     start = time.perf_counter()
     iterations = iterations or min(config.framework.max_iterations, 10)
     budget_per_round = budget_per_round or max(64, config.framework.base_quota * len(split.label_to_index))

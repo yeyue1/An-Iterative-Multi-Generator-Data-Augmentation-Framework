@@ -44,8 +44,9 @@ def _scalar_score(objectives: np.ndarray) -> np.ndarray:
     """Equal-weight normalized Tchebycheff scalarization over the archive.
 
     Each objective is divided by its ideal-nadir range of the current archive
-    and the largest normalized deviation is minimised, following Eq. (mopso_select)
-    of the manuscript.
+    and the largest normalized deviation is minimised, following Eq.
+    (mopso_select) of the manuscript.  The constant lambda_j = 1/3 does not
+    change the argmin and is therefore omitted.
     """
     ideal = objectives.min(axis=0)
     nadir = objectives.max(axis=0)
@@ -67,8 +68,9 @@ class MOPSO:
 
         pbest = positions.copy()
         pbest_obj = objectives.copy()
-        archive_pos = positions[_nondominated(objectives)]
-        archive_obj = objectives[_nondominated(objectives)]
+        non_dominated = _nondominated(objectives)
+        archive_pos = positions[non_dominated]
+        archive_obj = objectives[non_dominated]
 
         for _ in range(self.config.iterations):
             leader_idx = int(np.argmin(_scalar_score(archive_obj)))
@@ -86,7 +88,8 @@ class MOPSO:
             for i in range(len(positions)):
                 if _dominates(objectives[i], pbest_obj[i]) or (
                     not _dominates(pbest_obj[i], objectives[i])
-                    and _scalar_score(objectives[[i]])[0] < _scalar_score(pbest_obj[[i]])[0]
+                    and _scalar_score(objectives[[i]])[0]
+                    < _scalar_score(pbest_obj[[i]])[0]
                 ):
                     pbest[i] = positions[i]
                     pbest_obj[i] = objectives[i]
@@ -117,6 +120,12 @@ def optimize_generator_weights(
     config: MopsoConfig,
     seed: int,
 ) -> MopsoResult:
+    """Optimize the global generator weights.
+
+    The objective set follows Eqs. (mopso_mmd_agg)--(mopso_entropy).  The
+    entropy objective f_3 can be disabled for the corresponding sensitivity
+    row, in which case the Tchebycheff selection operates on two objectives.
+    """
     names = list(generator_names)
 
     def objective(weights: np.ndarray) -> np.ndarray:
@@ -124,7 +133,10 @@ def optimize_generator_weights(
         validation_f1 = sum(
             weights[i] * validation_f1_scores.get(names[i], 0.0) for i in range(len(names))
         )
-        entropy_objective = float(np.sum(weights * np.log(weights + 1e-12)))
-        return np.asarray([mmd, -validation_f1, entropy_objective], dtype=np.float64)
+        values = [mmd, -validation_f1]
+        if config.use_entropy_objective:
+            entropy_objective = float(np.sum(weights * np.log(weights + 1e-12)))
+            values.append(entropy_objective)
+        return np.asarray(values, dtype=np.float64)
 
     return MOPSO(config, seed=seed).optimize(len(names), objective)

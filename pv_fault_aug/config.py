@@ -15,6 +15,7 @@ SUPPORTED_VARIANTS = (
     "no_dual_gate",
     "no_convergence",
 )
+SUPPORTED_STOP_RULES = ("joint", "either")
 
 
 @dataclass
@@ -54,7 +55,9 @@ class GeneratorConfig:
     names: tuple[str, ...] = SUPPORTED_GENERATORS
     latent_dim: int = 32
     hidden_dims: tuple[int, ...] = (256, 512, 256)
-    epochs: int = 500
+    # Manuscript Table 4: generators are trained for 80 epochs.
+    epochs: int = 80
+    # The smoke-test switches in the run scripts lower both values.
     quick_epochs: int = 80
     batch_size: int = 128
     learning_rate: float = 2e-4
@@ -63,28 +66,42 @@ class GeneratorConfig:
     critic_steps: int = 5
     diffusion_steps: int = 1000
     diffusion_sample_steps: int = 50
-    guidance_scale: float = 3.0
+
+    def training_epochs(self) -> int:
+        """Epochs used for a normal run; ``--quick`` lowers both values."""
+        return max(1, min(self.epochs, self.quick_epochs))
 
 
 @dataclass
 class FrameworkConfig:
+    # Difficulty weights, Eq. (wdiff).
     alpha_error: float = 0.4
     alpha_uncertainty: float = 0.3
     alpha_scarcity: float = 0.3
+    # Laplace smoothing constant beta_s in Eq. (smk).
+    contribution_smoothing: float = 1.0
+    # Gate 1 thresholds.
     mmd_threshold: float = 0.10
     wasserstein_threshold: float = 0.05
+    # Gate 2: epsilon_g, rho_g, and epsilon_tol in Eq. (gate2accept).
     min_f1_gain: float = 0.005
     gate_utility_weight: float = 0.7
     macro_f1_degradation_tolerance: float = 0.002
+    # R_eval: matched evaluation runs for Gate 2 and the round-level gain.
     gate_eval_runs: int = 3
+    # Stopping rule, Eq. (stopjoint).
     max_iterations: int = 30
+    stop_f1_saturation: float = 0.005
+    stop_f1_deterioration: float = 0.002
     f1_saturation_window: int = 5
     center_drift_threshold: float = 0.01
+    stop_rule: str = "joint"
+    # Allocation bounds.
     max_per_round_generation_ratio: float = 5.0
-    min_samples_per_class: int = 50
     base_quota: int = 32
     min_quota: int = 4
     max_quota: int = 256
+    # Ablation switches.
     use_feedback_allocation: bool = True
     use_difficulty_allocation: bool = True
     use_dual_gate: bool = True
@@ -98,6 +115,9 @@ class MopsoConfig:
     inertia: float = 0.7
     cognitive: float = 1.5
     social: float = 1.5
+    # Entropy objective f_3 in Eq. (mopso_entropy); disabled for the
+    # sensitivity row "MOPSO without entropy objective".
+    use_entropy_objective: bool = True
 
 
 @dataclass
@@ -116,8 +136,11 @@ class ExperimentConfig:
         if self.variant == "baseline":
             self.framework.max_iterations = 0
         elif self.variant == "no_feedback":
+            # Class quotas and generator weights are fixed and uniform.
             self.framework.use_feedback_allocation = False
         elif self.variant == "no_difficulty":
+            # Feedback still drives generator weighting and screening, but
+            # per-class quotas are uniform.
             self.framework.use_difficulty_allocation = False
         elif self.variant == "no_dual_gate":
             self.framework.use_dual_gate = False
@@ -152,3 +175,17 @@ class ExperimentConfig:
             raise ValueError("gate_utility_weight must be in [0, 1]")
         if self.framework.gate_eval_runs < 1:
             raise ValueError("gate_eval_runs must be at least 1")
+        if self.framework.contribution_smoothing <= 0:
+            raise ValueError("contribution_smoothing must be positive")
+        if self.framework.stop_rule not in SUPPORTED_STOP_RULES:
+            raise ValueError(
+                f"stop_rule must be one of: {', '.join(SUPPORTED_STOP_RULES)}"
+            )
+        if self.framework.stop_f1_saturation < 0:
+            raise ValueError("stop_f1_saturation must be non-negative")
+        if self.framework.stop_f1_deterioration < 0:
+            raise ValueError("stop_f1_deterioration must be non-negative")
+        if self.framework.f1_saturation_window < 1:
+            raise ValueError("f1_saturation_window must be at least 1")
+        if self.framework.max_iterations < 0:
+            raise ValueError("max_iterations must be non-negative")

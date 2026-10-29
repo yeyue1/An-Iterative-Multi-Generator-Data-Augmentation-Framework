@@ -7,7 +7,9 @@ venv/
 env/
 
 outputs/
+outputs_*/
 demo_data/
+/pv_fault_demo.npz
 *.log
 
 .pytest_cache/

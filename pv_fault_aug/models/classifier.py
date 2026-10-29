@@ -187,6 +187,9 @@ def train_classifier(
     for _ in range(max_epochs):
         model.train()
         for xb, yb in train_loader:
+            # BatchNorm1d cannot be trained on a singleton batch.
+            if xb.size(0) < 2:
+                continue
             xb = xb.to(device)
             yb = yb.to(device)
             optimizer.zero_grad(set_to_none=True)

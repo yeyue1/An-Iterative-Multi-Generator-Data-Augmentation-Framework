@@ -31,6 +31,19 @@ def compute_difficulty_weights(feedback: FeedbackSignals, config: FrameworkConfi
     return np.maximum(weights, 1e-8)
 
 
+def compute_probing_quotas(
+    difficulty_weights: np.ndarray,
+    config: FrameworkConfig,
+) -> dict[int, int]:
+    """Probing quotas of Eq. (qprobe): clipping only, no per-round ratio cap."""
+    avg = float(np.mean(difficulty_weights))
+    quotas: dict[int, int] = {}
+    for class_id, weight in enumerate(difficulty_weights):
+        raw = config.base_quota * float(weight / max(avg, 1e-8))
+        quotas[class_id] = int(round(np.clip(raw, config.min_quota, config.max_quota)))
+    return quotas
+
+
 def compute_class_quotas(
     difficulty_weights: np.ndarray,
     class_counts: np.ndarray,

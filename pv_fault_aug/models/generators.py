@@ -54,12 +54,21 @@ class ConditionalDiscriminator(nn.Module):
 
 
 class ConditionalVAE(nn.Module):
-    def __init__(self, feature_dim: int, n_classes: int, latent_dim: int):
+    def __init__(
+        self,
+        feature_dim: int,
+        n_classes: int,
+        latent_dim: int,
+        hidden_dims: tuple[int, ...] = (256, 512, 256),
+    ):
         super().__init__()
         self.n_classes = n_classes
         self.latent_dim = latent_dim
-        self.encoder = MLP(feature_dim + n_classes, (512, 256, 128), latent_dim * 2)
-        self.decoder = MLP(latent_dim + n_classes, (128, 256, 512), feature_dim)
+        # Manuscript Table 4: hidden widths (256, 512, 256).
+        self.encoder = MLP(feature_dim + n_classes, tuple(hidden_dims), latent_dim * 2)
+        self.decoder = MLP(
+            latent_dim + n_classes, tuple(reversed(hidden_dims)), feature_dim
+        )
 
     def encode(self, x: torch.Tensor, y: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         params = self.encoder(torch.cat([x, one_hot(y, self.n_classes)], dim=1))
@@ -124,6 +133,10 @@ class BaseFaultGenerator(ABC):
     @abstractmethod
     def sample(self, class_id: int, n: int) -> np.ndarray:
         """Generate n synthetic samples for one class."""
+
+    def _finalize(self, samples: np.ndarray) -> np.ndarray:
+        """Keep generated I-V features on the normalized [0, 1] grid."""
+        return np.clip(samples, 0.0, 1.0).astype(np.float32)
 
     def sample_many(self, quotas: dict[int, int]) -> GeneratorResult:
         xs: list[np.ndarray] = []
@@ -191,7 +204,7 @@ class WganGpGenerator(BaseFaultGenerator):
         with torch.no_grad():
             z = torch.randn(n, self.config.latent_dim, device=self.device)
             y = torch.full((n,), class_id, dtype=torch.long, device=self.device)
-            return self.generator(z, y).cpu().numpy().astype(np.float32)
+            return self._finalize(self.generator(z, y).cpu().numpy())
 
 
 class ConditionalGanGenerator(BaseFaultGenerator):
@@ -229,13 +242,15 @@ class ConditionalGanGenerator(BaseFaultGenerator):
         with torch.no_grad():
             z = torch.randn(n, self.config.latent_dim, device=self.device)
             y = torch.full((n,), class_id, dtype=torch.long, device=self.device)
-            return self.generator(z, y).cpu().numpy().astype(np.float32)
+            return self._finalize(self.generator(z, y).cpu().numpy())
 
 
 class CvaeGenerator(BaseFaultGenerator):
     def __init__(self, feature_dim: int, n_classes: int, config: GeneratorConfig, device: torch.device, name: str = "cvae") -> None:
         super().__init__(name, feature_dim, n_classes, config, device)
-        self.model = ConditionalVAE(feature_dim, n_classes, config.latent_dim).to(device)
+        self.model = ConditionalVAE(
+            feature_dim, n_classes, config.latent_dim, config.hidden_dims
+        ).to(device)
 
     def fit(self, x: np.ndarray, y: np.ndarray, epochs: int | None = None) -> None:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
@@ -256,13 +271,15 @@ class CvaeGenerator(BaseFaultGenerator):
         with torch.no_grad():
             z = torch.randn(n, self.config.latent_dim, device=self.device)
             y = torch.full((n,), class_id, dtype=torch.long, device=self.device)
-            return self.model.decode(z, y).cpu().numpy().astype(np.float32)
+            return self._finalize(self.model.decode(z, y).cpu().numpy())
 
 
 class VaeGanGenerator(CvaeGenerator):
     def __init__(self, feature_dim: int, n_classes: int, config: GeneratorConfig, device: torch.device) -> None:
         super().__init__(feature_dim, n_classes, config, device, name="vaegan")
-        self.discriminator = ConditionalDiscriminator(feature_dim, n_classes, (256, 128)).to(device)
+        self.discriminator = ConditionalDiscriminator(
+            feature_dim, n_classes, tuple(reversed(config.hidden_dims))
+        ).to(device)
 
     def fit(self, x: np.ndarray, y: np.ndarray, epochs: int | None = None) -> None:
         vae_opt = torch.optim.Adam(self.model.parameters(), lr=self.config.learning_rate)
@@ -345,7 +362,7 @@ class DiffusionGenerator(BaseFaultGenerator):
                     next_t = steps[idx + 1]
                     next_a = self.alpha_bar[next_t].view(1, 1)
                     x = torch.sqrt(next_a) * x0 + torch.sqrt(1 - next_a) * eps
-        return x.cpu().numpy().astype(np.float32)
+        return self._finalize(x.cpu().numpy())
 
 
 def build_generators(

@@ -41,31 +41,49 @@ def normalize_confusion_counts(counts: np.ndarray) -> np.ndarray:
     return counts / row_sums * 100.0
 
 
+def class_pair_table_from_counts(
+    counts: np.ndarray,
+    class_names: list[str],
+    top_k: int = 10,
+) -> list[dict[str, float | int | str]]:
+    """Off-diagonal confusions from pooled confusion counts.
+
+    Each row reports the pooled count of true-class records predicted as the
+    competing class, the pooled support of the true class, and the percentage
+    of that support, mirroring Table 9 of the manuscript.
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    support = counts.sum(axis=1)
+    pairs = []
+    for true_id in range(counts.shape[0]):
+        for pred_id in range(counts.shape[1]):
+            if true_id == pred_id or counts[true_id, pred_id] <= 0:
+                continue
+            pairs.append(
+                {
+                    "true": class_names[true_id],
+                    "predicted": class_names[pred_id],
+                    "count": int(counts[true_id, pred_id]),
+                    "support": int(support[true_id]),
+                    "rate": float(
+                        counts[true_id, pred_id] / max(support[true_id], 1) * 100.0
+                    ),
+                }
+            )
+    pairs.sort(key=lambda item: item["rate"], reverse=True)
+    return pairs[:top_k]
+
+
 def class_pair_table(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     index_to_label: dict[int, str],
     top_k: int = 10,
-) -> list[dict[str, float | str]]:
-    """Most frequent off-diagonal confusions, in percent of the true class."""
-    n_classes = len(index_to_label)
-    matrix = confusion_matrix(y_true, y_pred, n_classes)
-    pairs = []
-    for true_id in range(n_classes):
-        for pred_id in range(n_classes):
-            if true_id == pred_id:
-                continue
-            rate = matrix[true_id, pred_id]
-            if rate > 0:
-                pairs.append(
-                    {
-                        "true": index_to_label[true_id],
-                        "predicted": index_to_label[pred_id],
-                        "rate": float(rate),
-                    }
-                )
-    pairs.sort(key=lambda item: item["rate"], reverse=True)
-    return pairs[:top_k]
+) -> list[dict[str, float | int | str]]:
+    """Convenience wrapper around :func:`class_pair_table_from_counts`."""
+    counts = confusion_counts(y_true, y_pred, len(index_to_label))
+    names = [index_to_label[idx] for idx in range(len(index_to_label))]
+    return class_pair_table_from_counts(counts, names, top_k)
 
 
 # --------------------------------------------------------------------------- #

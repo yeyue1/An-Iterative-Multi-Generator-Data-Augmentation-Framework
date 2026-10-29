@@ -71,6 +71,8 @@ def plot_run_level_f1(
         ax.set_xticklabels([s.capitalize() for s in scenarios])
         ax.set_ylabel(axis_label)
         ax.grid(axis="y", linestyle="--", alpha=0.35)
+    axes[0].set_title("(a)", loc="left", fontsize=9)
+    axes[1].set_title("(b)", loc="left", fontsize=9)
     _save(fig, path)
 
 
@@ -112,9 +114,10 @@ def plot_quota_distribution(
     std = matrix.std(axis=0, ddof=1) if len(matrix) > 1 else np.zeros_like(mean)
     positions = np.arange(len(class_names))
     axes[0].bar(positions, mean, yerr=std, capsize=4, color="#4c72b0", alpha=0.85)
-    for row in matrix:
+    offsets = np.linspace(-0.12, 0.12, len(matrix))
+    for run_idx, row in enumerate(matrix):
         axes[0].scatter(
-            positions + np.linspace(-0.12, 0.12, len(matrix)),
+            positions + offsets[run_idx],
             row,
             s=14,
             color="black",
@@ -145,6 +148,8 @@ def plot_quota_distribution(
         )
     axes[1].set_xlabel("Iteration")
     axes[1].set_ylabel("Accepted samples per iteration")
+    axes[0].set_title("(a)", loc="left", fontsize=9)
+    axes[1].set_title("(b)", loc="left", fontsize=9)
     _save(fig, path)
 
 
@@ -186,12 +191,51 @@ def plot_real_vs_generated(
     generated_by_class: dict[int, np.ndarray],
     class_names: list[str],
     path: Path,
+    physical_class: int = 0,
+    voltage_max: float | None = None,
+    current_max: float | None = None,
 ) -> None:
+    """Three-panel real-versus-generated figure (Fig. 7 of the manuscript).
+
+    (a) class-mean real (solid) and generated (dashed) I-V curves for all
+    seven classes; (b) linear discriminant projection with circles for real
+    samples and triangles for generated samples; (c) distributions of the
+    physical parameters of the normal-condition class, for which a common
+    reference operating point exists.
+    """
     from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+    from .analysis import physical_parameters
 
     classes = sorted(set(real_by_class) & set(generated_by_class))
     if not classes:
         return
+    fig, axes = plt.subplots(1, 3, figsize=(13.5, 3.8))
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(classes), 2)))
+
+    voltage = np.linspace(0.0, 1.0, next(iter(real_by_class.values())).shape[1])
+    for color, class_id in zip(colors, classes):
+        name = class_names[class_id]
+        axes[0].plot(
+            voltage,
+            real_by_class[class_id].mean(axis=0),
+            color=color,
+            linestyle="-",
+            linewidth=1.4,
+            label=name,
+        )
+        axes[0].plot(
+            voltage,
+            generated_by_class[class_id].mean(axis=0),
+            color=color,
+            linestyle="--",
+            linewidth=1.4,
+        )
+    axes[0].set_xlabel("Normalised voltage")
+    axes[0].set_ylabel("Normalised current")
+    axes[0].set_title("(a)", loc="left", fontsize=9)
+    axes[0].legend(frameon=False, fontsize=7, ncol=2)
+
     real_x = np.vstack([real_by_class[c] for c in classes])
     gen_x = np.vstack([generated_by_class[c] for c in classes])
     real_y = np.concatenate([np.full(len(real_by_class[c]), c) for c in classes])
@@ -199,32 +243,73 @@ def plot_real_vs_generated(
     features = np.vstack([real_x, gen_x])
     labels = np.concatenate([real_y, gen_y])
     projection = LinearDiscriminantAnalysis(n_components=2).fit_transform(features, labels)
-
-    fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.8))
     n_real = len(real_x)
-    axes[0].scatter(
-        projection[:n_real, 0], projection[:n_real, 1], s=10, alpha=0.5, label="Real"
-    )
-    axes[0].scatter(
-        projection[n_real:, 0],
-        projection[n_real:, 1],
-        s=14,
-        marker="^",
-        alpha=0.6,
-        label="Generated",
-    )
-    axes[0].set_xlabel("LD 1")
-    axes[0].set_ylabel("LD 2")
-    axes[0].legend(frameon=False, fontsize=8)
-
-    sample_class = classes[-1]
-    for curves, label, style in (
-        (real_by_class[sample_class], "Real", "-"),
-        (generated_by_class[sample_class], "Generated", "--"),
-    ):
-        mean_curve = np.mean(curves, axis=0)
-        axes[1].plot(np.linspace(0, 1, len(mean_curve)), mean_curve, style, label=label)
-    axes[1].set_xlabel("Normalised voltage")
-    axes[1].set_ylabel("Normalised current")
+    for color, class_id in zip(colors, classes):
+        real_mask = labels[:n_real] == class_id
+        gen_mask = labels[n_real:] == class_id
+        axes[1].scatter(
+            projection[:n_real][real_mask, 0],
+            projection[:n_real][real_mask, 1],
+            s=10,
+            marker="o",
+            color=color,
+            alpha=0.55,
+        )
+        axes[1].scatter(
+            projection[n_real:][gen_mask, 0],
+            projection[n_real:][gen_mask, 1],
+            s=14,
+            marker="^",
+            color=color,
+            alpha=0.6,
+        )
+    axes[1].scatter([], [], s=14, marker="o", color="black", label="Real")
+    axes[1].scatter([], [], s=14, marker="^", color="black", label="Generated")
+    axes[1].set_xlabel("LD 1")
+    axes[1].set_ylabel("LD 2")
+    axes[1].set_title("(b)", loc="left", fontsize=9)
     axes[1].legend(frameon=False, fontsize=8)
+
+    if physical_class in real_by_class and physical_class in generated_by_class:
+        real_params = physical_parameters(
+            real_by_class[physical_class], voltage_max, current_max
+        )
+        gen_params = physical_parameters(
+            generated_by_class[physical_class], voltage_max, current_max
+        )
+        keys = ["voc", "isc", "pmax", "fill_factor"]
+        tick_labels = ["$V_{oc}$", "$I_{sc}$", "$P_{mp}$", "FF"]
+        positions = np.arange(len(keys))
+        real_data = [real_params[key] for key in keys]
+        gen_data = [gen_params[key] for key in keys]
+        boxes = axes[2].boxplot(
+            real_data,
+            positions=positions - 0.18,
+            widths=0.3,
+            patch_artist=True,
+            showfliers=False,
+        )
+        for patch in boxes["boxes"]:
+            patch.set_facecolor("#4c72b0")
+            patch.set_alpha(0.7)
+        boxes = axes[2].boxplot(
+            gen_data,
+            positions=positions + 0.18,
+            widths=0.3,
+            patch_artist=True,
+            showfliers=False,
+        )
+        for patch in boxes["boxes"]:
+            patch.set_facecolor("#dd8452")
+            patch.set_alpha(0.7)
+        axes[2].set_xticks(positions)
+        axes[2].set_xticklabels(tick_labels)
+        axes[2].set_ylabel("Parameter value")
+        axes[2].set_title("(c)", loc="left", fontsize=9)
+        axes[2].plot([], color="#4c72b0", linewidth=6, label="Real")
+        axes[2].plot([], color="#dd8452", linewidth=6, label="Generated")
+        axes[2].legend(frameon=False, fontsize=8)
+        axes[2].set_xlabel(f"{class_names[physical_class]} samples")
+    else:
+        axes[2].axis("off")
     _save(fig, path)

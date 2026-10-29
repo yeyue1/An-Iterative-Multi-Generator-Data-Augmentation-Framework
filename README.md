@@ -1,182 +1,183 @@
-# PV closed-loop augmentation code
+# Closed-loop multi-generator augmentation for PV fault diagnosis
 
-This folder contains the Python implementation corresponding to the paper draft.
-The code is written so the real I-V dataset can be added later without changing
-the closed-loop framework.
+This repository contains the implementation of the feedback-guided
+multi-generator data-augmentation framework described in the manuscript
+*An Iterative Multi-Generator Data Augmentation Framework for Photovoltaic
+Fault Diagnosis*. It covers the closed-loop policy, its ablation variants, the
+comparison baselines, and the additional analyses reported in the revised
+manuscript.
 
-## Expected dataset format
+The field I-V dataset is not included (commercial confidentiality, see the
+manuscript's Data-availability statement). All scripts read a CSV or NPZ file
+from `--data-path`, and a small synthetic demo file can be generated for smoke
+tests.
 
-CSV:
+## Environment
 
-```text
-label,f0,f1,...,f99
-NS, ...
-SC, ...
-```
-
-NPZ:
-
-```python
-np.savez("pv_fault_data.npz", x=x_array, y=labels)
-```
-
-`x` must have shape `[n_samples, 100]`. Labels can be the strings
-`NS`, `SC`, `OC`, `PS`, `DOA`, `DOA+SC`, `DOA+OC`, or integer IDs
-`0..6` in that order.
-
-## Main command
-
-From the repository root:
+Python 3.10 with PyTorch, NumPy, scikit-learn, pandas, and Matplotlib:
 
 ```powershell
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --output-dir outputs\scarce
+pip install -r requirements.txt
 ```
 
-If the real field dataset is not available yet, create a small demo NPZ file
-and run a smoke test:
+## Dataset format
+
+CSV: a label column (`label` by default) plus one column per I-V point
+(`f0` ... `f99`, or any names when `--feature-prefix` is used). Optional
+metadata columns (`irradiance`, `temperature`, `module_id`, `condition_id`)
+are excluded from the features and carried through the split.
+
+NPZ: an array `x` of shape `[n_samples, 100]` and an array `y` with either the
+string labels `NS`, `SC`, `OC`, `PS`, `DOA`, `DOA+SC`, `DOA+OC` or integer IDs
+`0..6` in that order. Optional metadata arrays use the same column names.
+
+## Experimental protocol
+
+Three real-sample scenarios are constructed before augmentation (Table 2):
+`balanced` (160 samples/class), `imbalanced` (all 6710 records), and `scarce`
+(about 10% of each class, 671 records). Each scenario is split 60/20/20 into
+training, validation, and test subsets with record-level stratification.
+
+**Every run and every method uses one fixed partition per scenario**; only
+model initialization and stochastic training differ between runs. The shared
+partition is built from the data seed (`--partition-seed`, default 42; set it
+explicitly to reproduce a partition), while run `i` uses model seed
+`partition_seed + 100*i`. Validation data drive feedback, Gate 2, MOPSO
+objectives, and stopping; the test subset is used only for final reporting.
+All scripts follow this convention.
+
+Unless noted, reported values are the mean and sample standard deviation
+(`ddof=1`) over five matched runs. No p-values are computed: differences
+between methods are descriptive matched-run differences.
+
+## Paper-to-code map
+
+| Manuscript item | Script | Output |
+| --- | --- | --- |
+| Table 4 (implementation settings) | `pv_fault_aug/config.py` | `config.json` written by each script |
+| Table 5 (comparison with baselines) | `run_baselines.py --scenario all` | `comparison_table.csv`, `summary.json`, `runs.csv` |
+| Table 6 (offline cost) | `run_baselines.py --scenario scarce` | `cost_table.csv` |
+| Table 7 (component ablation) | `run_experiment.py --variant ...` | `{scenario}_summary.json` |
+| Table 8 (per-class F1) | `run_baselines.py` / `run_analysis.py` | `per_class_summary.csv` |
+| Table 9 (class-pair confusion) | `run_analysis.py` | `class_pairs.csv` |
+| Table 10 (classifier generality) | `run_classifier_generality.py` | `classifier_generality.csv` |
+| Table 11 (sensitivity and stopping rule) | `run_sensitivity.py` | `sensitivity.csv` |
+| Table 12 (generator pool, natural mode) | `run_generator_pool.py --mode natural` | `pool_natural_summary.csv` |
+| Table 13 (same-budget generator pool) | `run_generator_pool.py --mode fixed --budget 500` | `pool_fixed_summary.csv` |
+| Table 14 (irradiance/temperature regimes) | `run_analysis.py` | `regimes.csv` |
+| Table 15 (measurement/domain perturbations) | `run_analysis.py` | `perturbations.csv`, `group_heldout.csv` |
+| Table 16 (physical I-V parameters) | `run_analysis.py` | `physical_parameters.csv` |
+| Fig. 5 (run-level F1 and stopping) | `make_figures.py` | `f1_convergence.png` |
+| Fig. 6 (quota distribution, scarce) | `make_figures.py` | `quota_distribution.png` |
+| Fig. 7 (real vs generated) | `run_analysis.py` | `figures/real_vs_generated.png` |
+| Fig. 8 (confusion matrices) | `run_analysis.py` | `figures/confusion_matrices.png` |
+
+## Main commands
 
 ```powershell
+# Demo smoke test (synthetic data, not the field data)
 python run_experiment.py --data-path demo_data\pv_fault_demo.npz --make-demo-data
 python run_experiment.py --data-path demo_data\pv_fault_demo.npz --scenario scarce --generators cvae --runs 1 --quick
-```
 
-If the CSV uses different names, pass them explicitly:
+# Proposed framework, one scenario
+python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --output-dir outputs\scarce
 
-```powershell
-python run_experiment.py --data-path path\to\pv_fault_data.csv --label-column fault_type --feature-prefix iv_ --feature-dim 100
-```
-
-Use `--quick` for a syntax and pipeline smoke test before running full
-experiments:
-
-```powershell
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --quick
-```
-
-Run ablation variants for the comparison tables:
-
-```powershell
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --variant baseline
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --variant no_feedback
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --variant no_difficulty
+# Three scenarios for Table 5 and the ablation of Table 7
+python run_baselines.py --data-path path\to\pv_fault_data.csv --scenario all --runs 5
+python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario balanced --variant no_feedback
+python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario imbalanced --variant no_difficulty
 python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --variant no_dual_gate
 python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --variant no_convergence
-```
 
-Run generator-pool experiments by selecting a subset:
-
-```powershell
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --generators wgan_gp,ctgan,cvae
-```
-
-## Additional experiments reported in the manuscript
-
-### Baseline comparison and cost table
-
-`run_baselines.py` evaluates the proposed framework next to the baselines used
-in the comparison table: no augmentation, SMOTE, one-shot WGAN-GP/CVAE/DDPM,
-the static equal-weight ensemble, GAN+SMOTE, uncertainty-guided adaptive
-augmentation, and curriculum-style adaptive augmentation.  It writes per-run
-metrics, a comparison table, wall-clock cost, and run-matched paired
-differences against the proposed framework.
-
-```powershell
-python run_baselines.py --data-path path\to\pv_fault_data.csv --scenario all --runs 5
-```
-
-Outputs: `runs.csv`, `comparison_table.csv`, `summary.json`,
-`paired_vs_proposed.csv`, and `predictions/` (per-run test predictions).
-
-### Generator-pool comparison under a fixed budget
-
-`run_generator_pool.py` compares individual generators and cumulative
-combinations.  `--mode fixed` allocates an identical accepted-sample budget to
-every pool (the controlled comparison); `--mode natural` runs the full
-closed-loop policy with each pool, so larger pools accept more samples.
-
-```powershell
-python run_generator_pool.py --data-path path\to\pv_fault_data.csv --scenario scarce --mode fixed --budget 500
+# Generator pool: natural (Table 12) and controlled same-budget (Table 13)
 python run_generator_pool.py --data-path path\to\pv_fault_data.csv --scenario scarce --mode natural
-```
+python run_generator_pool.py --data-path path\to\pv_fault_data.csv --scenario scarce --mode fixed --budget 500
 
-### Error analysis, robustness, and physical checks
-
-`run_analysis.py` produces the confusion matrices, class-pair table, operating
-regime analysis, measurement/domain perturbations, group-held-out shifts, and
-real-versus-generated physical parameters.
-
-```powershell
+# Error analysis, robustness, and physical checks
 python run_analysis.py --data-path path\to\pv_fault_data.csv --scenario scarce --runs 5
-```
 
-Optional metadata columns enable the regime and group-held-out experiments.  A
-CSV may include `irradiance`, `temperature`, `module_id`, and `condition_id`;
-an NPZ may store them as arrays with the same names.  Pass
-`--metadata-columns irradiance,temperature,module_id,condition_id` (the default)
-so they are excluded from the features and carried through the split.  Use
-`--voltage-max` and `--current-max` to express physical parameters in volts,
-amperes, and watts; otherwise the parameters are reported in normalised units.
+# Classifier generality (Table 10) and sensitivity (Table 11)
+python run_classifier_generality.py --data-path path\to\pv_fault_data.csv --scenario scarce
+python run_sensitivity.py --data-path path\to\pv_fault_data.csv --scenario scarce
 
-Outputs: `analysis_summary.json` and `figures/` (`confusion_matrices.png`,
-`real_vs_generated.png`).
-
-### Alternative classifiers
-
-All scripts accept `--classifier {cnn1d,resnet1d,bilstm}` for the
-classifier-generality experiment.
-
-```powershell
-python run_baselines.py --data-path path\to\pv_fault_data.csv --scenario scarce --classifier resnet1d --runs 5
-python run_experiment.py --data-path path\to\pv_fault_data.csv --scenario scarce --classifier bilstm
-```
-
-### Run-level figures
-
-`make_figures.py` builds the convergence and allocation figures from the
-`{scenario}_run_*` directories written by `run_experiment.py`.
-
-```powershell
+# Figures 5 and 6 from the run directories written by run_experiment.py
 python make_figures.py --runs-root outputs --output-dir outputs\figures
 ```
 
-## Implemented modules
+Use `--quick` for a fast syntax and pipeline check before the full run; the
+full six-generator loop with the manuscript settings is computationally
+expensive, especially the diffusion generators and the R_eval = 3 Gate-2
+evaluations per class and round.
 
-- `pv_fault_aug/data.py`: CSV/NPZ loading, balanced/imbalanced/scarce scenario construction, stratified train/validation/test split.
-- `pv_fault_aug/models/classifier.py`: 1D-CNN downstream classifier.
-- `pv_fault_aug/models/generators.py`: WGAN-GP, conditional GAN as CTGAN-style generator, CVAE, VAE-GAN, DDPM, and conditional DDPM.
-- `pv_fault_aug/feedback.py`: per-class error, entropy confidence, and scarcity feedback.
-- `pv_fault_aug/allocation.py`: difficulty-adaptive class quota allocation and generator-class quota splitting.
-- `pv_fault_aug/mopso.py`: compact MOPSO implementation for generator global weights.
-- `pv_fault_aug/screening.py`: MMD/Wasserstein distributional gate and F1-gain performance gate.
-- `pv_fault_aug/pipeline.py`: closed-loop iterative augmentation process and result export.
-- `pv_fault_aug/baselines.py`: SMOTE, one-shot generation, static ensemble, GAN+SMOTE, uncertainty-guided and curriculum-style baselines under the same splits.
-- `pv_fault_aug/analysis.py`: confusion/class-pair analysis, operating regimes, measurement and domain perturbations, group-held-out splits, and physical I-V parameters.
-- `pv_fault_aug/stats.py`: run-matched paired differences and bootstrap confidence intervals (descriptive, no p-values).
-- `pv_fault_aug/figures.py`: run-level convergence/allocation, confusion-matrix, and real-versus-generated figures.
+## Ablation variants
 
-## Paper correspondence
+`--variant` implements the component-level ablation of Table 7:
 
-The implementation follows Algorithm 1 in the manuscript:
+- `baseline`: no augmentation (`max_iterations = 0`).
+- `no_feedback`: class quotas and generator weights are fixed and uniform;
+  MOPSO probing and contribution-score updates are skipped.
+- `no_difficulty`: feedback still drives generator weighting and screening, but
+  per-class quotas are uniform.
+- `no_dual_gate`: Gate 1 and Gate 2 are disabled; the round-level F1-gain
+  acceptance criterion of the convergence module is retained, so a round whose
+  candidates deteriorate validation F1-macro is discarded.
+- `no_convergence`: the loop runs for the full `max_iterations` budget without
+  F1-saturation / feature-center stopping.
 
-- The real training split initializes `D_aug`, while validation and test data are never augmented.
-- I-V features are min-max normalized with training-set statistics after the stratified split.
-- Per-class error, entropy confidence, and scarcity form the feedback vector used for difficulty weights.
-- MOPSO selects global generator weights from probing quotas using distributional quality, validation F1, and entropy objectives.
-- Class quotas and generator-class quotas are updated before candidate generation.
-- Candidate samples pass class-wise MMD/Wasserstein screening and the class-bound marginal F1 gate before entering `D_aug`.
-- Convergence uses round-level F1 saturation together with feature-center drift, matching the joint stopping rule in the paper.
+## Sensitivity options
 
-`--variant baseline` trains the classifier directly on the selected scenario
-without synthetic augmentation. The other variants keep the same data split and
-disable one mechanism at a time, matching the ablation logic in the paper.
+`run_sensitivity.py` evaluates the eight rows of Table 11: the default
+`(0.4, 0.3, 0.3)` difficulty weights, uniform weights, error-only,
+scarcity-only, MOPSO without the entropy objective, either-condition stopping,
+and joint stopping with `tau_stop = 0.005` and `0.020`. The same switches are
+available directly on `run_experiment.py`
+(`--alpha-error/--alpha-uncertainty/--alpha-scarcity`, `--stop-rule`,
+`--stop-saturation`, `--stop-deterioration`, `--center-drift`,
+`--no-entropy-objective`), so any other setting can be run through the main
+entry point. The two `tau_stop` rows of Table 11 map to `--center-drift`.
+
+## Outputs
+
+`run_experiment.py` writes one directory per run with the final metrics,
+per-class F1, the complete iteration history, the test predictions, and the
+accepted synthetic samples. Summary files are written at the scenario level.
+The other scripts write the CSV/JSON tables listed above plus `config.json`
+recording the resolved configuration of the executed experiment.
+
+## Modules
+
+- `pv_fault_aug/data.py`: CSV/NPZ loading, scenario construction, fixed
+  stratified split, training-set min-max normalization.
+- `pv_fault_aug/models/generators.py`: WGAN-GP, CTGAN-style conditional GAN,
+  CVAE, VAE-GAN, DDPM, and conditional DDPM.
+- `pv_fault_aug/models/classifier.py`: 1D-CNN plus the 1D-ResNet and BiLSTM
+  classifiers used in the generality analysis.
+- `pv_fault_aug/feedback.py`: per-class error rate, entropy confidence, and
+  scarcity.
+- `pv_fault_aug/allocation.py`: difficulty weights, probing and operational
+  quotas, generator-class ratios.
+- `pv_fault_aug/mopso.py`: MOPSO with distributional, negative-F1, and entropy
+  objectives and normalized Tchebycheff archive selection.
+- `pv_fault_aug/screening.py`: class-wise MMD/Wasserstein Gate 1 and the paired
+  R_eval class-bound marginal-gain Gate 2, plus the round-level F1 gain.
+- `pv_fault_aug/pipeline.py`: the closed-loop process and result export.
+- `pv_fault_aug/baselines.py`: no augmentation, SMOTE, one-shot generators,
+  static ensemble, GAN+SMOTE, uncertainty-guided and curriculum-style
+  baselines.
+- `pv_fault_aug/analysis.py`: confusion/class-pair analysis, regime
+  stratification, measurement and domain perturbations, group-held-out splits,
+  and physical I-V parameters.
+- `pv_fault_aug/stats.py`: paired differences and bootstrap intervals
+  (descriptive only).
+- `pv_fault_aug/figures.py`: run-level convergence, quota allocation,
+  confusion-matrix, and three-panel real-versus-generated figures.
 
 ## Notes
 
-The repository stores the runnable configuration used by the manuscript,
-including split ratios, random seeds, generator settings, screening thresholds,
-and convergence-control parameters. Each experiment writes the resolved
-configuration to `config.json` in the output directory.
-
-The full DDPM and six-generator loop is computationally expensive. Use `--quick`
-first after the dataset is available, then run the full setting for final
-tables and figures.
+The generated samples are clipped to the normalized `[0, 1]` I-V grid. Gate 2
+and the round-level gain are paired: the R_eval baseline and temporary
+classifiers share the same seed in each evaluation run. Physical parameters
+(Voc, Isc, Pmp, fill factor) are computed for normal-condition samples, the
+only class with a common reference operating point; pass `--voltage-max` and
+`--current-max` to express them in volts, amperes, and watts, otherwise they
+are reported on the normalized scale.

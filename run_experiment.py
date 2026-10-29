@@ -5,10 +5,13 @@ from dataclasses import asdict
 from pathlib import Path
 import json
 
+import numpy as np
+
 from pv_fault_aug.config import (
     ExperimentConfig,
     SUPPORTED_CLASSIFIERS,
     SUPPORTED_GENERATORS,
+    SUPPORTED_STOP_RULES,
     SUPPORTED_VARIANTS,
 )
 
@@ -33,6 +36,13 @@ def parse_args() -> argparse.Namespace:
         help="Real-sample scenario before augmentation.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs"))
+    parser.add_argument(
+        "--partition-seed",
+        type=int,
+        default=None,
+        help="Seed of the shared partition. Defaults to the configured data seed; "
+        "all runs reuse this one partition and differ only in model seeds.",
+    )
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:0.")
     parser.add_argument(
         "--classifier",
@@ -46,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated metadata columns to carry through the split "
         "(e.g. irradiance,temperature,module_id,condition_id).",
     )
-    parser.add_argument("--runs", type=int, default=5, help="Number of stratified random runs.")
+    parser.add_argument("--runs", type=int, default=5, help="Number of matched random runs.")
     parser.add_argument(
         "--variant",
         choices=SUPPORTED_VARIANTS,
@@ -57,6 +67,24 @@ def parse_args() -> argparse.Namespace:
         "--generators",
         default=",".join(SUPPORTED_GENERATORS),
         help="Comma-separated generator subset, e.g. wgan_gp,cvae,ddpm.",
+    )
+    # Sensitivity options of Table 11.
+    parser.add_argument("--alpha-error", type=float, default=0.4)
+    parser.add_argument("--alpha-uncertainty", type=float, default=0.3)
+    parser.add_argument("--alpha-scarcity", type=float, default=0.3)
+    parser.add_argument("--stop-rule", choices=SUPPORTED_STOP_RULES, default="joint")
+    parser.add_argument("--stop-saturation", type=float, default=0.005)
+    parser.add_argument("--stop-deterioration", type=float, default=0.002)
+    parser.add_argument(
+        "--center-drift",
+        type=float,
+        default=0.01,
+        help="Feature-center convergence threshold tau_stop (Table 11 rows).",
+    )
+    parser.add_argument(
+        "--no-entropy-objective",
+        action="store_true",
+        help="Drop the MOPSO entropy objective f_3 (Table 11 sensitivity row).",
     )
     parser.add_argument(
         "--quick",
@@ -72,8 +100,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def make_demo_data(path: Path, feature_dim: int, seed: int = 42) -> None:
-    import numpy as np
-
     from pv_fault_aug.config import FAULT_CLASSES
 
     rng = np.random.default_rng(seed)
@@ -96,18 +122,7 @@ def make_demo_data(path: Path, feature_dim: int, seed: int = 42) -> None:
     print(f"demo dataset written to {path}")
 
 
-def main() -> None:
-    args = parse_args()
-
-    import numpy as np
-
-    if args.make_demo_data:
-        make_demo_data(args.data_path, args.feature_dim)
-        return
-
-    from pv_fault_aug.data import load_scenario_split
-    from pv_fault_aug.pipeline import ClosedLoopAugmentor
-
+def build_config(args: argparse.Namespace) -> ExperimentConfig:
     config = ExperimentConfig()
     config.data.data_path = args.data_path
     config.data.label_column = args.label_column
@@ -126,6 +141,16 @@ def main() -> None:
     config.generators.names = tuple(
         name.strip() for name in args.generators.split(",") if name.strip()
     )
+    config.framework.alpha_error = args.alpha_error
+    config.framework.alpha_uncertainty = args.alpha_uncertainty
+    config.framework.alpha_scarcity = args.alpha_scarcity
+    config.framework.stop_rule = args.stop_rule
+    config.framework.stop_f1_saturation = args.stop_saturation
+    config.framework.stop_f1_deterioration = args.stop_deterioration
+    config.framework.center_drift_threshold = args.center_drift
+    config.mopso.use_entropy_objective = not args.no_entropy_objective
+    if args.partition_seed is not None:
+        config.data.random_seed = args.partition_seed
 
     if args.quick:
         config.classifier.epochs = 20
@@ -140,28 +165,88 @@ def main() -> None:
 
     config.apply_variant()
     config.validate()
+    return config
+
+
+def write_summary(
+    config: ExperimentConfig, results, output_dir: Path, class_names: list[str]
+) -> None:
+    metric_keys = list(results[0].final_metrics)
+    summary: dict[str, dict[str, float]] = {}
+    for key in metric_keys:
+        values = np.asarray([r.final_metrics[key] for r in results], dtype=np.float64)
+        summary[key] = {
+            "mean": float(np.nanmean(values)),
+            "std": float(np.nanstd(values, ddof=1)) if len(values) > 1 else 0.0,
+        }
+    with (output_dir / f"{config.scenario}_summary.json").open("w", encoding="utf-8") as fh:
+        json.dump(summary, fh, indent=2)
+
+    per_class: dict[str, dict[str, float]] = {}
+    for name in class_names:
+        values = np.asarray([r.per_class_f1[name] for r in results], dtype=np.float64)
+        per_class[name] = {
+            "mean": float(np.nanmean(values)),
+            "std": float(np.nanstd(values, ddof=1)) if len(values) > 1 else 0.0,
+        }
+    with (output_dir / f"{config.scenario}_per_class_summary.json").open(
+        "w", encoding="utf-8"
+    ) as fh:
+        json.dump(per_class, fh, indent=2)
+
+    with (output_dir / f"{config.scenario}_per_class_summary.csv").open(
+        "w", encoding="utf-8"
+    ) as fh:
+        fh.write("class,f1_mean,f1_std\n")
+        for name, stats in per_class.items():
+            fh.write(f"{name},{stats['mean']:.4f},{stats['std']:.4f}\n")
+
+    iterations = np.asarray([len(r.history) for r in results], dtype=np.float64)
+    accepted = np.asarray([len(r.accepted_y) for r in results], dtype=np.float64)
+    with (output_dir / f"{config.scenario}_run_summary.csv").open("w", encoding="utf-8") as fh:
+        fh.write("run,f1_macro,iterations,accepted_samples\n")
+        for run_idx, result in enumerate(results, start=1):
+            fh.write(
+                f"{run_idx},{result.final_metrics['f1_macro']:.4f},"
+                f"{len(result.history)},{len(result.accepted_y)}\n"
+            )
+    print(
+        f"iterations: {iterations.mean():.2f} +/- "
+        f"{iterations.std(ddof=1) if len(iterations) > 1 else 0.0:.2f}; "
+        f"accepted: {accepted.mean():.1f} +/- "
+        f"{accepted.std(ddof=1) if len(accepted) > 1 else 0.0:.1f}"
+    )
+    print("summary:", summary)
+
+
+def main() -> None:
+    args = parse_args()
+
+    if args.make_demo_data:
+        make_demo_data(args.data_path, args.feature_dim)
+        return
+
+    from pv_fault_aug.data import load_scenario_split
+    from pv_fault_aug.pipeline import ClosedLoopAugmentor
+
+    config = build_config(args)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     with (config.output_dir / "config.json").open("w", encoding="utf-8") as fh:
         json.dump(asdict(config), fh, default=str, indent=2)
 
-    all_metrics: list[dict[str, float]] = []
+    # One fixed partition shared by every run (Section 3.3); only the model
+    # initialization and stochastic training seeds vary across runs.
+    split = load_scenario_split(config.data, config.scenario, config.data.random_seed)
+    results = []
+    runner = ClosedLoopAugmentor(config)
     for run_idx in range(config.data.n_runs):
         seed = config.data.random_seed + run_idx * 100
-        split = load_scenario_split(config.data, config.scenario, seed)
-        runner = ClosedLoopAugmentor(config)
         result = runner.run(split, seed)
-        run_dir = config.output_dir / f"{config.scenario}_run_{run_idx + 1}"
-        runner.save_result(result, run_dir)
-        all_metrics.append(result.final_metrics)
+        runner.save_result(result, config.output_dir / f"{config.scenario}_run_{run_idx + 1}")
+        results.append(result)
         print(f"[run {run_idx + 1}] {result.final_metrics}")
 
-    summary = {}
-    for key in all_metrics[0]:
-        values = np.asarray([m[key] for m in all_metrics], dtype=np.float64)
-        summary[key] = {"mean": float(np.nanmean(values)), "std": float(np.nanstd(values))}
-    with (config.output_dir / f"{config.scenario}_summary.json").open("w", encoding="utf-8") as fh:
-        json.dump(summary, fh, indent=2)
-    print("summary:", summary)
+    write_summary(config, results, config.output_dir, config.data.class_names)
 
 
 if __name__ == "__main__":
